@@ -1,0 +1,475 @@
+package services
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ses"
+	"github.com/aws/aws-sdk-go-v2/service/ses/types"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+)
+
+// SenderRequest representa os dados para cadastro de um remetente
+type SenderRequest struct {
+	Email string `json:"email" binding:"required,email"`
+	Name  string `json:"name"`
+}
+
+// SenderResponse representa os dados de resposta de um remetente
+type SenderResponse struct {
+	Email            string    `json:"email"`
+	Name             string    `json:"name,omitempty"`
+	VerificationStatus string  `json:"verificationStatus"`
+	RegisteredAt     time.Time `json:"registeredAt"`
+}
+
+// MetricsResponse representa as métricas gerais de envio de e-mails
+type MetricsResponse struct {
+	Period          string  `json:"period"`
+	TotalSent       int64   `json:"totalSent"`
+	TotalDelivered  int64   `json:"totalDelivered"`
+	TotalOpened     int64   `json:"totalOpened"`
+	TotalClicked    int64   `json:"totalClicked"`
+	TotalBounced    int64   `json:"totalBounced"`
+	TotalComplaints int64   `json:"totalComplaints"`
+	DeliveryRate    float64 `json:"deliveryRate"`
+	OpenRate        float64 `json:"openRate"`
+	ClickRate       float64 `json:"clickRate"`
+	BounceRate      float64 `json:"bounceRate"`
+	ComplaintRate   float64 `json:"complaintRate"`
+}
+
+// SenderMetricsResponse representa as métricas de envio para um remetente específico
+type SenderMetricsResponse struct {
+	Email           string            `json:"email"`
+	Period          string            `json:"period"`
+	TotalSent       int64             `json:"totalSent"`
+	TotalDelivered  int64             `json:"totalDelivered"`
+	TotalOpened     int64             `json:"totalOpened"`
+	TotalClicked    int64             `json:"totalClicked"`
+	TotalBounced    int64             `json:"totalBounced"`
+	TotalComplaints int64             `json:"totalComplaints"`
+	DeliveryRate    float64           `json:"deliveryRate"`
+	OpenRate        float64           `json:"openRate"`
+	ClickRate       float64           `json:"clickRate"`
+	BounceRate      float64           `json:"bounceRate"`
+	ComplaintRate   float64           `json:"complaintRate"`
+	DailyStats      []DailyMetrics    `json:"dailyStats,omitempty"`
+}
+
+// DailyMetrics representa métricas diárias
+type DailyMetrics struct {
+	Date            string  `json:"date"`
+	Sent            int64   `json:"sent"`
+	Delivered       int64   `json:"delivered"`
+	Opened          int64   `json:"opened"`
+	Clicked         int64   `json:"clicked"`
+	Bounced         int64   `json:"bounced"`
+	Complaints      int64   `json:"complaints"`
+	DeliveryRate    float64 `json:"deliveryRate"`
+	OpenRate        float64 `json:"openRate"`
+	ClickRate       float64 `json:"clickRate"`
+}
+
+// SESService gerencia as operações com o Amazon SES
+type SESService struct {
+	sesClient      *ses.Client
+	cloudWatchClient *cloudwatch.Client
+}
+
+// NewSESService cria uma nova instância do SESService
+func NewSESService() *SESService {
+	// Carregar configuração da AWS
+	cfg, err := config.LoadDefaultConfig(context.Background())
+	if err != nil {
+		panic(fmt.Sprintf("Falha ao carregar configuração da AWS: %v", err))
+	}
+	
+	return &SESService{
+		sesClient:      ses.NewFromConfig(cfg),
+		cloudWatchClient: cloudwatch.NewFromConfig(cfg),
+	}
+}
+
+// RegisterSender registra um novo remetente no Amazon SES
+func (s *SESService) RegisterSender(req SenderRequest) (*SenderResponse, error) {
+	// Verificar identidade de e-mail no SES
+	input := &ses.VerifyEmailIdentityInput{
+		EmailAddress: aws.String(req.Email),
+	}
+	
+	_, err := s.sesClient.VerifyEmailIdentity(context.Background(), input)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao verificar identidade do e-mail: %w", err)
+	}
+	
+	// Retornar resposta com status pendente
+	return &SenderResponse{
+		Email:            req.Email,
+		Name:             req.Name,
+		VerificationStatus: "PENDING",
+		RegisteredAt:     time.Now(),
+	}, nil
+}
+
+// ListSenders lista todos os remetentes cadastrados
+func (s *SESService) ListSenders() ([]SenderResponse, error) {
+	input := &ses.ListIdentitiesInput{
+		IdentityType: types.IdentityTypeEmailAddress,
+		MaxItems:     aws.Int32(100),
+	}
+	
+	result, err := s.sesClient.ListIdentities(context.Background(), input)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao listar identidades: %w", err)
+	}
+	
+	// Se não houver identidades, retornar slice vazio
+	if len(result.Identities) == 0 {
+		return []SenderResponse{}, nil
+	}
+	
+	// Obter status de verificação para cada identidade
+	vInput := &ses.GetIdentityVerificationAttributesInput{
+		Identities: result.Identities,
+	}
+	
+	vResult, err := s.sesClient.GetIdentityVerificationAttributes(context.Background(), vInput)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao obter atributos de verificação: %w", err)
+	}
+	
+	// Construir resposta
+	senders := make([]SenderResponse, 0, len(result.Identities))
+	for _, identity := range result.Identities {
+		status := "UNKNOWN"
+		if attr, ok := vResult.VerificationAttributes[identity]; ok {
+			status = string(attr.VerificationStatus)
+		}
+		
+		senders = append(senders, SenderResponse{
+			Email:            identity,
+			VerificationStatus: status,
+			RegisteredAt:     time.Now(), // Na prática, seria armazenado em banco de dados
+		})
+	}
+	
+	return senders, nil
+}
+
+// GetSender obtém informações de um remetente específico
+func (s *SESService) GetSender(email string) (*SenderResponse, error) {
+	input := &ses.GetIdentityVerificationAttributesInput{
+		Identities: []string{email},
+	}
+	
+	result, err := s.sesClient.GetIdentityVerificationAttributes(context.Background(), input)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao obter atributos de verificação: %w", err)
+	}
+	
+	// Verificar se a identidade existe
+	attr, ok := result.VerificationAttributes[email]
+	if !ok {
+		return nil, nil // Remetente não encontrado
+	}
+	
+	return &SenderResponse{
+		Email:            email,
+		VerificationStatus: string(attr.VerificationStatus),
+		RegisteredAt:     time.Now(), // Na prática, seria armazenado em banco de dados
+	}, nil
+}
+
+// DeleteSender remove um remetente
+func (s *SESService) DeleteSender(email string) error {
+	input := &ses.DeleteIdentityInput{
+		Identity: aws.String(email),
+	}
+	
+	_, err := s.sesClient.DeleteIdentity(context.Background(), input)
+	if err != nil {
+		return fmt.Errorf("falha ao remover identidade: %w", err)
+	}
+	
+	return nil
+}
+
+// GetMetrics obtém métricas gerais de envio de e-mails
+func (s *SESService) GetMetrics(startDateStr, endDateStr string) (*MetricsResponse, error) {
+	// Definir período de consulta
+	startDate, endDate, err := parseDateRange(startDateStr, endDateStr)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Configurar período para CloudWatch
+	period := int32(86400) // 1 dia em segundos
+	
+	// Métricas a serem coletadas
+	metrics := map[string]string{
+		"Send":       "AWS/SES",
+		"Delivery":   "AWS/SES",
+		"Open":       "AWS/SES",
+		"Click":      "AWS/SES",
+		"Bounce":     "AWS/SES",
+		"Complaint":  "AWS/SES",
+	}
+	
+	// Coletar métricas do CloudWatch
+	metricData := make(map[string]int64)
+	for metricName, namespace := range metrics {
+		input := &cloudwatch.GetMetricStatisticsInput{
+			Namespace:  aws.String(namespace),
+			MetricName: aws.String(metricName),
+			StartTime:  &startDate,
+			EndTime:    &endDate,
+			Period:     &period,
+			Statistics: []cwtypes.Statistic{cwtypes.StatisticSum},
+		}
+		
+		result, err := s.cloudWatchClient.GetMetricStatistics(context.Background(), input)
+		if err != nil {
+			return nil, fmt.Errorf("falha ao obter métrica %s: %w", metricName, err)
+		}
+		
+		// Somar valores
+		var sum int64
+		for _, datapoint := range result.Datapoints {
+			sum += int64(*datapoint.Sum)
+		}
+		
+		metricData[metricName] = sum
+	}
+	
+	// Calcular taxas
+	sent := metricData["Send"]
+	delivered := metricData["Delivery"]
+	opened := metricData["Open"]
+	clicked := metricData["Click"]
+	bounced := metricData["Bounce"]
+	complaints := metricData["Complaint"]
+	
+	var deliveryRate, openRate, clickRate, bounceRate, complaintRate float64
+	
+	if sent > 0 {
+		deliveryRate = float64(delivered) / float64(sent) * 100
+		bounceRate = float64(bounced) / float64(sent) * 100
+		complaintRate = float64(complaints) / float64(sent) * 100
+	}
+	
+	if delivered > 0 {
+		openRate = float64(opened) / float64(delivered) * 100
+		clickRate = float64(clicked) / float64(delivered) * 100
+	}
+	
+	// Formatar período
+	periodStr := fmt.Sprintf("%s a %s", startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	
+	return &MetricsResponse{
+		Period:          periodStr,
+		TotalSent:       sent,
+		TotalDelivered:  delivered,
+		TotalOpened:     opened,
+		TotalClicked:    clicked,
+		TotalBounced:    bounced,
+		TotalComplaints: complaints,
+		DeliveryRate:    deliveryRate,
+		OpenRate:        openRate,
+		ClickRate:       clickRate,
+		BounceRate:      bounceRate,
+		ComplaintRate:   complaintRate,
+	}, nil
+}
+
+// GetSenderMetrics obtém métricas de envio para um remetente específico
+func (s *SESService) GetSenderMetrics(email, startDateStr, endDateStr string) (*SenderMetricsResponse, error) {
+	// Verificar se o remetente existe
+	sender, err := s.GetSender(email)
+	if err != nil {
+		return nil, err
+	}
+	
+	if sender == nil {
+		return nil, nil // Remetente não encontrado
+	}
+	
+	// Definir período de consulta
+	startDate, endDate, err := parseDateRange(startDateStr, endDateStr)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Configurar período para CloudWatch
+	period := int32(86400) // 1 dia em segundos
+	
+	// Dimensão para filtrar pelo remetente específico
+	dimensions := []cwtypes.Dimension{
+		{
+			Name:  aws.String("Source"),
+			Value: aws.String(email),
+		},
+	}
+	
+	// Métricas a serem coletadas
+	metrics := map[string]string{
+		"Send":       "AWS/SES",
+		"Delivery":   "AWS/SES",
+		"Open":       "AWS/SES",
+		"Click":      "AWS/SES",
+		"Bounce":     "AWS/SES",
+		"Complaint":  "AWS/SES",
+	}
+	
+	// Coletar métricas do CloudWatch
+	metricData := make(map[string]int64)
+	dailyMetrics := make(map[string]map[string]int64)
+	
+	for metricName, namespace := range metrics {
+		input := &cloudwatch.GetMetricStatisticsInput{
+			Namespace:  aws.String(namespace),
+			MetricName: aws.String(metricName),
+			StartTime:  &startDate,
+			EndTime:    &endDate,
+			Period:     &period,
+			Statistics: []cwtypes.Statistic{cwtypes.StatisticSum},
+			Dimensions: dimensions,
+		}
+		
+		result, err := s.cloudWatchClient.GetMetricStatistics(context.Background(), input)
+		if err != nil {
+			return nil, fmt.Errorf("falha ao obter métrica %s: %w", metricName, err)
+		}
+		
+		// Somar valores totais
+		var sum int64
+		for _, datapoint := range result.Datapoints {
+			sum += int64(*datapoint.Sum)
+			
+			// Agrupar por dia
+			dateKey := datapoint.Timestamp.Format("2006-01-02")
+			if _, ok := dailyMetrics[dateKey]; !ok {
+				dailyMetrics[dateKey] = make(map[string]int64)
+			}
+			dailyMetrics[dateKey][metricName] += int64(*datapoint.Sum)
+		}
+		
+		metricData[metricName] = sum
+	}
+	
+	// Calcular taxas globais
+	sent := metricData["Send"]
+	delivered := metricData["Delivery"]
+	opened := metricData["Open"]
+	clicked := metricData["Click"]
+	bounced := metricData["Bounce"]
+	complaints := metricData["Complaint"]
+	
+	var deliveryRate, openRate, clickRate, bounceRate, complaintRate float64
+	
+	if sent > 0 {
+		deliveryRate = float64(delivered) / float64(sent) * 100
+		bounceRate = float64(bounced) / float64(sent) * 100
+		complaintRate = float64(complaints) / float64(sent) * 100
+	}
+	
+	if delivered > 0 {
+		openRate = float64(opened) / float64(delivered) * 100
+		clickRate = float64(clicked) / float64(delivered) * 100
+	}
+	
+	// Preparar dados diários
+	daily := make([]DailyMetrics, 0, len(dailyMetrics))
+	for date, metrics := range dailyMetrics {
+		dailySent := metrics["Send"]
+		dailyDelivered := metrics["Delivery"]
+		dailyOpened := metrics["Open"]
+		dailyClicked := metrics["Click"]
+		dailyBounced := metrics["Bounce"]
+		dailyComplaints := metrics["Complaint"]
+		
+		var dailyDeliveryRate, dailyOpenRate, dailyClickRate float64
+		
+		if dailySent > 0 {
+			dailyDeliveryRate = float64(dailyDelivered) / float64(dailySent) * 100
+		}
+		
+		if dailyDelivered > 0 {
+			dailyOpenRate = float64(dailyOpened) / float64(dailyDelivered) * 100
+			dailyClickRate = float64(dailyClicked) / float64(dailyDelivered) * 100
+		}
+		
+		daily = append(daily, DailyMetrics{
+			Date:         date,
+			Sent:         dailySent,
+			Delivered:    dailyDelivered,
+			Opened:       dailyOpened,
+			Clicked:      dailyClicked,
+			Bounced:      dailyBounced,
+			Complaints:   dailyComplaints,
+			DeliveryRate: dailyDeliveryRate,
+			OpenRate:     dailyOpenRate,
+			ClickRate:    dailyClickRate,
+		})
+	}
+	
+	// Formatar período
+	periodStr := fmt.Sprintf("%s a %s", startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	
+	return &SenderMetricsResponse{
+		Email:           email,
+		Period:          periodStr,
+		TotalSent:       sent,
+		TotalDelivered:  delivered,
+		TotalOpened:     opened,
+		TotalClicked:    clicked,
+		TotalBounced:    bounced,
+		TotalComplaints: complaints,
+		DeliveryRate:    deliveryRate,
+		OpenRate:        openRate,
+		ClickRate:       clickRate,
+		BounceRate:      bounceRate,
+		ComplaintRate:   complaintRate,
+		DailyStats:      daily,
+	}, nil
+}
+
+// parseDateRange analisa e valida os parâmetros de data
+func parseDateRange(startDateStr, endDateStr string) (time.Time, time.Time, error) {
+	var startDate, endDate time.Time
+	var err error
+	
+	// Se não informada, usar últimos 30 dias
+	if startDateStr == "" {
+		startDate = time.Now().AddDate(0, 0, -30)
+	} else {
+		startDate, err = time.Parse("2006-01-02", startDateStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("formato de data inicial inválido (use YYYY-MM-DD): %w", err)
+		}
+	}
+	
+	// Se não informada, usar data atual
+	if endDateStr == "" {
+		endDate = time.Now()
+	} else {
+		endDate, err = time.Parse("2006-01-02", endDateStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("formato de data final inválido (use YYYY-MM-DD): %w", err)
+		}
+		
+		// Ajustar para fim do dia
+		endDate = endDate.Add(24*time.Hour - time.Second)
+	}
+	
+	// Validar período
+	if endDate.Before(startDate) {
+		return time.Time{}, time.Time{}, fmt.Errorf("data final não pode ser anterior à data inicial")
+	}
+	
+	return startDate, endDate, nil
+}
