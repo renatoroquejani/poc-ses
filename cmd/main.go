@@ -45,6 +45,18 @@ func main() {
 	
 	// Rotas para envio de e-mails
 	v1.POST("/emails/send", h.SendEmail)
+	v1.DELETE("/emails/cancel/:messageId", h.CancelEmail)
+	
+	// Rotas para templates
+	v1.POST("/templates", h.CreateTemplate)
+	v1.GET("/templates", h.ListTemplates)
+	v1.GET("/templates/:id", h.GetTemplate)
+	v1.DELETE("/templates/:id", h.DeleteTemplate)
+	
+	// Rotas para monitoramento de entregas
+	v1.GET("/delivery/status/:messageId", h.GetDeliveryStatus)
+	v1.GET("/delivery/status", h.GetAllDeliveryStatus)
+	v1.GET("/delivery/report", h.GetRealTimeReport)
 	
 	// Rotas para envio de e-mails
 	v1.POST("/emails/send", h.SendEmail)

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -32,12 +34,32 @@ type EmailRequest struct {
 	HtmlBody    string   `json:"htmlBody,omitempty"`
 	TextBody    string   `json:"textBody,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	TemplateId  string   `json:"templateId,omitempty"`
+	TemplateData map[string]interface{} `json:"templateData,omitempty"`
 }
 
 // Attachment representa um anexo de e-mail
 type Attachment struct {
 	Filename string `json:"filename" binding:"required"`
 	Content  string `json:"content" binding:"required"`
+}
+
+// Template representa um template de e-mail
+type Template struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Subject     string    `json:"subject"`
+	HtmlPart    string    `json:"htmlPart"`
+	TextPart    string    `json:"textPart"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// TemplateRequest representa uma solicitação para criar um template
+type TemplateRequest struct {
+	Name        string `json:"name" binding:"required"`
+	Subject     string `json:"subject" binding:"required"`
+	HtmlPart    string `json:"htmlPart,omitempty"`
+	TextPart    string `json:"textPart,omitempty"`
 }
 
 // EmailResponse representa a resposta após o envio de um e-mail
@@ -109,8 +131,13 @@ type DailyMetrics struct {
 
 // SESService gerencia as operações com o Amazon SES
 type SESService struct {
-	sesClient      *ses.Client
+	sesClient        *ses.Client
 	cloudWatchClient *cloudwatch.Client
+}
+
+// GetCloudWatchClient retorna o cliente CloudWatch para outros serviços
+func (s *SESService) GetCloudWatchClient() *cloudwatch.Client {
+	return s.cloudWatchClient
 }
 
 // NewSESService cria uma nova instância do SESService
@@ -506,6 +533,116 @@ func parseDateRange(startDateStr, endDateStr string) (time.Time, time.Time, erro
 	return startDate, endDate, nil
 }
 
+// CreateTemplate cria um template de e-mail
+func (s *SESService) CreateTemplate(req TemplateRequest) (*Template, error) {
+	// Verificar se pelo menos um tipo de corpo foi fornecido
+	if req.HtmlPart == "" && req.TextPart == "" {
+		return nil, fmt.Errorf("pelo menos um tipo de corpo (HTML ou texto) deve ser fornecido")
+	}
+
+	// ID do template: nome em minúsculas, sem espaços e com timestamp
+	templateID := strings.ToLower(strings.ReplaceAll(req.Name, " ", "-"))
+	templateID = templateID + "-" + fmt.Sprintf("%d", time.Now().Unix())
+
+	// Criar input para SES
+	input := &ses.CreateTemplateInput{
+		Template: &types.Template{
+			TemplateName: aws.String(templateID),
+			SubjectPart:  aws.String(req.Subject),
+			HtmlPart:     aws.String(req.HtmlPart),
+			TextPart:     aws.String(req.TextPart),
+		},
+	}
+
+	// Criar template no SES
+	_, err := s.sesClient.CreateTemplate(context.Background(), input)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao criar template: %w", err)
+	}
+
+	// Retornar o template criado
+	return &Template{
+		ID:        templateID,
+		Name:      req.Name,
+		Subject:   req.Subject,
+		HtmlPart:  req.HtmlPart,
+		TextPart:  req.TextPart,
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+// ListTemplates lista todos os templates disponíveis
+func (s *SESService) ListTemplates() ([]Template, error) {
+	input := &ses.ListTemplatesInput{
+		MaxItems: aws.Int32(100),
+	}
+
+	result, err := s.sesClient.ListTemplates(context.Background(), input)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao listar templates: %w", err)
+	}
+
+	templates := make([]Template, 0, len(result.TemplatesMetadata))
+	for _, metadata := range result.TemplatesMetadata {
+		// Obter detalhes de cada template
+		getInput := &ses.GetTemplateInput{
+			TemplateName: metadata.Name,
+		}
+
+		templateDetail, err := s.sesClient.GetTemplate(context.Background(), getInput)
+		if err != nil {
+			continue // Ignorar este template e continuar
+		}
+
+		// Adicionar à lista
+		templates = append(templates, Template{
+			ID:        *templateDetail.Template.TemplateName,
+			Name:      *templateDetail.Template.TemplateName,
+			Subject:   *templateDetail.Template.SubjectPart,
+			HtmlPart:  *templateDetail.Template.HtmlPart,
+			TextPart:  *templateDetail.Template.TextPart,
+			CreatedAt: *metadata.CreatedTimestamp,
+		})
+	}
+
+	return templates, nil
+}
+
+// GetTemplate obtém um template específico pelo ID
+func (s *SESService) GetTemplate(id string) (*Template, error) {
+	input := &ses.GetTemplateInput{
+		TemplateName: aws.String(id),
+	}
+
+	result, err := s.sesClient.GetTemplate(context.Background(), input)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao obter template: %w", err)
+	}
+
+	return &Template{
+		ID:        *result.Template.TemplateName,
+		Name:      *result.Template.TemplateName,
+		Subject:   *result.Template.SubjectPart,
+		HtmlPart:  *result.Template.HtmlPart,
+		TextPart:  *result.Template.TextPart,
+		CreatedAt: time.Now(), // Não é possível obter este valor aqui
+	}, nil
+}
+
+// DeleteTemplate remove um template
+func (s *SESService) DeleteTemplate(id string) error {
+	input := &ses.DeleteTemplateInput{
+		TemplateName: aws.String(id),
+	}
+
+	_, err := s.sesClient.DeleteTemplate(context.Background(), input)
+	if err != nil {
+		return fmt.Errorf("falha ao remover template: %w", err)
+	}
+
+	return nil
+}
+
 // SendEmail envia um e-mail utilizando o Amazon SES
 func (s *SESService) SendEmail(req EmailRequest) (*EmailResponse, error) {
 	// Verificar se o remetente existe e está verificado
@@ -520,6 +657,11 @@ func (s *SESService) SendEmail(req EmailRequest) (*EmailResponse, error) {
 
 	if sender.VerificationStatus != "Success" {
 		return nil, fmt.Errorf("remetente não verificado. Status atual: %s", sender.VerificationStatus)
+	}
+
+	// Se estiver usando um template
+	if req.TemplateId != "" {
+		return s.sendEmailWithTemplate(req)
 	}
 
 	// Verificar se pelo menos um corpo (HTML ou texto) foi fornecido
@@ -691,4 +833,75 @@ func (s *SESService) createRawEmailWithAttachments(req EmailRequest) ([]byte, er
 	}
 
 	return emailBuffer.Bytes(), nil
+}
+
+// sendEmailWithTemplate envia um e-mail utilizando um template do SES
+func (s *SESService) sendEmailWithTemplate(req EmailRequest) (*EmailResponse, error) {
+	// Verificar se o template existe
+	_, err := s.GetTemplate(req.TemplateId)
+	if err != nil {
+		return nil, fmt.Errorf("template não encontrado: %w", err)
+	}
+
+	// Converter dados do template para JSON
+	templateData := "{}"
+	if len(req.TemplateData) > 0 {
+		dataBytes, err := json.Marshal(req.TemplateData)
+		if err != nil {
+			return nil, fmt.Errorf("falha ao serializar dados do template: %w", err)
+		}
+		templateData = string(dataBytes)
+	}
+
+	// Preparar destinatários
+	destination := &ses.Destination{
+		ToAddresses: req.To,
+	}
+	
+	if len(req.Cc) > 0 {
+		destination.CcAddresses = req.Cc
+	}
+	
+	if len(req.Bcc) > 0 {
+		destination.BccAddresses = req.Bcc
+	}
+
+	// Criar input para envio com template
+	input := &ses.SendTemplatedEmailInput{
+		Source:       aws.String(req.From),
+		Destination:  destination,
+		Template:     aws.String(req.TemplateId),
+		TemplateData: aws.String(templateData),
+	}
+
+	// Enviar e-mail
+	result, err := s.sesClient.SendTemplatedEmail(context.Background(), input)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao enviar e-mail com template: %w", err)
+	}
+
+	// Retornar resposta de sucesso
+	return &EmailResponse{
+		MessageID:  *result.MessageId,
+		From:       req.From,
+		To:         req.To,
+		Subject:    "[Template: " + req.TemplateId + "]",
+		SentAt:     time.Now(),
+		StatusCode: 200,
+		Status:     "success",
+	}, nil
+}
+
+// CancelScheduledEmail cancela o envio de um e-mail agendado
+func (s *SESService) CancelScheduledEmail(messageId string) error {
+	input := &ses.CancelScheduledSendingInput{
+		MessageId: aws.String(messageId),
+	}
+
+	_, err := s.sesClient.CancelScheduledSending(context.Background(), input)
+	if err != nil {
+		return fmt.Errorf("falha ao cancelar envio de e-mail: %w", err)
+	}
+
+	return nil
 }

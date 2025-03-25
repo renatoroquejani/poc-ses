@@ -73,6 +73,20 @@ A API estará disponível em `http://localhost:8080` e a documentação do Swagg
 ### Envio de E-mails
 
 - `POST /api/v1/emails/send` - Envia um e-mail usando um remetente verificado
+- `DELETE /api/v1/emails/cancel/{messageId}` - Cancela o envio de um e-mail agendado
+
+### Templates de E-mail
+
+- `POST /api/v1/templates` - Cria um novo template de e-mail
+- `GET /api/v1/templates` - Lista todos os templates disponíveis
+- `GET /api/v1/templates/{id}` - Obtém detalhes de um template específico
+- `DELETE /api/v1/templates/{id}` - Remove um template
+
+### Monitoramento de Entregas
+
+- `GET /api/v1/delivery/status/{messageId}` - Obtém o status de entrega de um e-mail
+- `GET /api/v1/delivery/status` - Lista todos os status de entrega recentes
+- `GET /api/v1/delivery/report` - Obtém relatório em tempo real de entregas
 
 ## Exemplo de uso
 
@@ -126,8 +140,44 @@ curl -X POST http://localhost:8080/api/v1/emails/send \
 
 **Observação**: O campo `content` do anexo deve estar codificado em Base64.
 
+### Criar um template de e-mail
+
+```bash
+curl -X POST http://localhost:8080/api/v1/templates \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Boas-vindas",
+    "subject": "Bem-vindo, {{name}}!",
+    "htmlPart": "<h1>Olá, {{name}}!</h1><p>Bem-vindo ao nosso serviço.</p>",
+    "textPart": "Olá, {{name}}! Bem-vindo ao nosso serviço."
+  }'
+```
+
+### Enviar um e-mail usando template
+
+```bash
+curl -X POST http://localhost:8080/api/v1/emails/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "seu-email-verificado@exemplo.com",
+    "to": ["destinatario@exemplo.com"],
+    "templateId": "boas-vindas-1616161616",
+    "templateData": {
+      "name": "João da Silva"
+    }
+  }'
+```
+
+### Obter relatório de entregas em tempo real
+
+```bash
+curl -X GET "http://localhost:8080/api/v1/delivery/report?hours=12"
+```
+
 ## Observações importantes
 
 1. Ao cadastrar um novo remetente, o Amazon SES enviará um e-mail para o endereço informado para verificação.
 2. O remetente só poderá ser utilizado para envios após a verificação.
 3. As métricas são coletadas do CloudWatch e podem ter um atraso de até 15 minutos.
+4. O monitoramento em tempo real de entregas é disponibilizado através de um cache local que mantém os status recentes.
+5. Os templates de e-mail suportam variáveis no formato {{nome_variavel}} que são substituídas pelos valores fornecidos em templateData.
