@@ -8,6 +8,7 @@ Esta aplicação oferece uma API REST para interagir com o Amazon Simple Email S
 - Coleta de métricas gerais de envio de e-mails
 - Coleta de métricas específicas por remetente
 - Documentação completa da API via Swagger
+- Envio de e-mails com suporte a anexos
 
 ## Requisitos
 
@@ -69,6 +70,10 @@ A API estará disponível em `http://localhost:8080` e a documentação do Swagg
 - `GET /api/v1/metrics` - Obtém métricas gerais de envios
 - `GET /api/v1/metrics/sender/{email}` - Obtém métricas de um remetente específico
 
+### Envio de E-mails
+
+- `POST /api/v1/emails/send` - Envia um e-mail usando um remetente verificado
+
 ## Exemplo de uso
 
 ### Cadastrar um remetente
@@ -84,6 +89,42 @@ curl -X POST http://localhost:8080/api/v1/senders \
 ```bash
 curl -X GET "http://localhost:8080/api/v1/metrics/sender/seu-email@exemplo.com?startDate=2023-01-01&endDate=2023-02-01"
 ```
+
+### Enviar um e-mail
+
+```bash
+curl -X POST http://localhost:8080/api/v1/emails/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "seu-email-verificado@exemplo.com",
+    "to": ["destinatario@exemplo.com"],
+    "cc": ["copia@exemplo.com"],
+    "subject": "Teste de Envio",
+    "htmlBody": "<h1>Olá</h1><p>Este é um e-mail de teste enviado pelo Amazon SES.</p>",
+    "textBody": "Olá! Este é um e-mail de teste enviado pelo Amazon SES."
+  }'
+```
+
+### Enviar um e-mail com anexo
+
+```bash
+curl -X POST http://localhost:8080/api/v1/emails/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "seu-email-verificado@exemplo.com",
+    "to": ["destinatario@exemplo.com"],
+    "subject": "E-mail com anexo",
+    "htmlBody": "<h1>Olá</h1><p>Este é um e-mail com anexo enviado pelo Amazon SES.</p>",
+    "attachments": [
+      {
+        "filename": "documento.txt",
+        "content": "SGVsbG8sIHRoaXMgaXMgYSB0ZXN0IGZpbGUgY29udGVudCE="
+      }
+    ]
+  }'
+```
+
+**Observação**: O campo `content` do anexo deve estar codificado em Base64.
 
 ## Observações importantes
 

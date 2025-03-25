@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 	"github.com/gin-gonic/gin"
 	"github.com/renat/poc-ses/internal/services"
 )
@@ -154,6 +155,19 @@ func (h *Handler) GetMetrics(c *gin.Context) {
 // @Failure      404        {object}  map[string]string
 // @Failure      500        {object}  map[string]string
 // @Router       /metrics/sender/{email} [get]
+
+// SendEmail godoc
+// @Summary      Envia um e-mail usando um remetente verificado
+// @Description  Envia um e-mail usando um remetente previamente verificado no Amazon SES
+// @Tags         emails
+// @Accept       json
+// @Produce      json
+// @Param        email  body      services.EmailRequest  true  "Detalhes do e-mail"
+// @Success      200    {object}  services.EmailResponse
+// @Failure      400    {object}  map[string]string
+// @Failure      404    {object}  map[string]string
+// @Failure      500    {object}  map[string]string
+// @Router       /emails/send [post]
 func (h *Handler) GetSenderMetrics(c *gin.Context) {
 	email := c.Param("email")
 	startDate := c.DefaultQuery("startDate", "")
@@ -171,4 +185,37 @@ func (h *Handler) GetSenderMetrics(c *gin.Context) {
 	}
 	
 	c.JSON(http.StatusOK, metrics)
+}
+
+// SendEmail processa a requisição de envio de e-mail
+func (h *Handler) SendEmail(c *gin.Context) {
+	var req services.EmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Dados inválidos: " + err.Error()})
+		return
+	}
+	
+	// Validação adicional
+	if (req.HtmlBody == "" && req.TextBody == "") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Pelo menos um tipo de corpo (HTML ou texto) deve ser fornecido"})
+		return
+	}
+	
+	// Enviar e-mail
+	result, err := h.sesService.SendEmail(req)
+	if err != nil {
+		status := http.StatusInternalServerError
+		
+		// Verificar erros específicos
+		if strings.Contains(err.Error(), "remetente não encontrado") {
+			status = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "remetente não verificado") {
+			status = http.StatusBadRequest
+		}
+		
+		c.JSON(status, gin.H{"error": "Falha ao enviar e-mail: " + err.Error()})
+		return
+	}
+	
+	c.JSON(http.StatusOK, result)
 }

@@ -43,6 +43,12 @@ func main() {
 	v1.GET("/metrics", h.GetMetrics)
 	v1.GET("/metrics/sender/:email", h.GetSenderMetrics)
 	
+	// Rotas para envio de e-mails
+	v1.POST("/emails/send", h.SendEmail)
+	
+	// Rotas para envio de e-mails
+	v1.POST("/emails/send", h.SendEmail)
+	
 	// Swagger
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	

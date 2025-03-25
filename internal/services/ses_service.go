@@ -1,7 +1,9 @@
 package services
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"time"
 
@@ -11,12 +13,42 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ses/types"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"gopkg.in/gomail.v2"
 )
 
 // SenderRequest representa os dados para cadastro de um remetente
 type SenderRequest struct {
 	Email string `json:"email" binding:"required,email"`
 	Name  string `json:"name"`
+}
+
+// EmailRequest representa os dados para envio de um e-mail
+type EmailRequest struct {
+	From        string   `json:"from" binding:"required,email"`
+	To          []string `json:"to" binding:"required,dive,email"`
+	Cc          []string `json:"cc,omitempty" binding:"omitempty,dive,email"`
+	Bcc         []string `json:"bcc,omitempty" binding:"omitempty,dive,email"`
+	Subject     string   `json:"subject" binding:"required"`
+	HtmlBody    string   `json:"htmlBody,omitempty"`
+	TextBody    string   `json:"textBody,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+// Attachment representa um anexo de e-mail
+type Attachment struct {
+	Filename string `json:"filename" binding:"required"`
+	Content  string `json:"content" binding:"required"`
+}
+
+// EmailResponse representa a resposta após o envio de um e-mail
+type EmailResponse struct {
+	MessageID  string    `json:"messageId"`
+	From       string    `json:"from"`
+	To         []string  `json:"to"`
+	Subject    string    `json:"subject"`
+	SentAt     time.Time `json:"sentAt"`
+	StatusCode int       `json:"statusCode"`
+	Status     string    `json:"status"`
 }
 
 // SenderResponse representa os dados de resposta de um remetente
@@ -472,4 +504,191 @@ func parseDateRange(startDateStr, endDateStr string) (time.Time, time.Time, erro
 	}
 	
 	return startDate, endDate, nil
+}
+
+// SendEmail envia um e-mail utilizando o Amazon SES
+func (s *SESService) SendEmail(req EmailRequest) (*EmailResponse, error) {
+	// Verificar se o remetente existe e está verificado
+	sender, err := s.GetSender(req.From)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao verificar remetente: %w", err)
+	}
+
+	if sender == nil {
+		return nil, fmt.Errorf("remetente não encontrado")
+	}
+
+	if sender.VerificationStatus != "Success" {
+		return nil, fmt.Errorf("remetente não verificado. Status atual: %s", sender.VerificationStatus)
+	}
+
+	// Verificar se pelo menos um corpo (HTML ou texto) foi fornecido
+	if req.HtmlBody == "" && req.TextBody == "" {
+		return nil, fmt.Errorf("pelo menos um tipo de corpo (HTML ou texto) deve ser fornecido")
+	}
+
+	// Preparar conteúdo do e-mail
+	var messageBodyHTML, messageBodyText *ses.Body
+	emailContent := &ses.EmailContent{
+		Simple: &ses.Message{},
+	}
+
+	// Corpo HTML
+	if req.HtmlBody != "" {
+		messageBodyHTML = &ses.Body{
+			Html: &ses.Content{
+				Charset: aws.String("UTF-8"),
+				Data:    aws.String(req.HtmlBody),
+			},
+		}
+	}
+
+	// Corpo texto
+	if req.TextBody != "" {
+		messageBodyText = &ses.Body{
+			Text: &ses.Content{
+				Charset: aws.String("UTF-8"),
+				Data:    aws.String(req.TextBody),
+			},
+		}
+	}
+
+	// Assunto
+	subject := &ses.Content{
+		Charset: aws.String("UTF-8"),
+		Data:    aws.String(req.Subject),
+	}
+
+	// Montar corpo da mensagem
+	emailContent.Simple.Body = &ses.Body{}
+	if messageBodyHTML != nil {
+		emailContent.Simple.Body.Html = messageBodyHTML.Html
+	}
+	if messageBodyText != nil {
+		emailContent.Simple.Body.Text = messageBodyText.Text
+	}
+	emailContent.Simple.Subject = subject
+
+	// Criar anexos se houver
+	if len(req.Attachments) > 0 {
+		// Convertemos para mensagem MIME com anexos
+		rawMessage, err := s.createRawEmailWithAttachments(req)
+		if err != nil {
+			return nil, fmt.Errorf("falha ao criar e-mail com anexos: %w", err)
+		}
+		
+		// Enviar e-mail raw
+		sendRawEmailInput := &ses.SendRawEmailInput{
+			RawMessage: &types.RawMessage{
+				Data: rawMessage,
+			},
+		}
+		
+		result, err := s.sesClient.SendRawEmail(context.Background(), sendRawEmailInput)
+		if err != nil {
+			return nil, fmt.Errorf("falha ao enviar e-mail com anexos: %w", err)
+		}
+		
+		return &EmailResponse{
+			MessageID:  *result.MessageId,
+			From:       req.From,
+			To:         req.To,
+			Subject:    req.Subject,
+			SentAt:     time.Now(),
+			StatusCode: 200,
+			Status:     "success",
+		}, nil
+	}
+
+	// Preparar destinatários
+	destination := &ses.Destination{
+		ToAddresses: req.To,
+	}
+	
+	if len(req.Cc) > 0 {
+		destination.CcAddresses = req.Cc
+	}
+	
+	if len(req.Bcc) > 0 {
+		destination.BccAddresses = req.Bcc
+	}
+
+	// Criar input para envio
+	input := &ses.SendEmailInput{
+		FromEmailAddress: aws.String(req.From),
+		Destination:      destination,
+		Content:          emailContent,
+	}
+
+	// Enviar e-mail
+	result, err := s.sesClient.SendEmail(context.Background(), input)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao enviar e-mail: %w", err)
+	}
+
+	// Retornar resposta de sucesso
+	return &EmailResponse{
+		MessageID:  *result.MessageId,
+		From:       req.From,
+		To:         req.To,
+		Subject:    req.Subject,
+		SentAt:     time.Now(),
+		StatusCode: 200,
+		Status:     "success",
+	}, nil
+}
+
+// createRawEmailWithAttachments cria uma mensagem de e-mail raw com anexos
+func (s *SESService) createRawEmailWithAttachments(req EmailRequest) ([]byte, error) {
+	// Criar uma nova mensagem de e-mail
+	m := gomail.NewMessage()
+
+	// Definir cabeçalhos básicos
+	m.SetHeader("From", req.From)
+	m.SetHeader("To", req.To...)
+	
+	if len(req.Cc) > 0 {
+		m.SetHeader("Cc", req.Cc...)
+	}
+	
+	if len(req.Bcc) > 0 {
+		m.SetHeader("Bcc", req.Bcc...)
+	}
+	
+	m.SetHeader("Subject", req.Subject)
+	
+	// Definir corpo de e-mail
+	if req.HtmlBody != "" {
+		if req.TextBody != "" {
+			m.SetBody("text/plain", req.TextBody)
+			m.AddAlternative("text/html", req.HtmlBody)
+		} else {
+			m.SetBody("text/html", req.HtmlBody)
+		}
+	} else {
+		m.SetBody("text/plain", req.TextBody)
+	}
+
+	// Adicionar anexos
+	for _, attachment := range req.Attachments {
+		// Decodificar conteúdo base64
+		data, err := base64.StdEncoding.DecodeString(attachment.Content)
+		if err != nil {
+			return nil, fmt.Errorf("falha ao decodificar anexo %s: %w", attachment.Filename, err)
+		}
+		
+		// Anexar o arquivo decodificado
+		m.AttachReader(attachment.Filename, bytes.NewReader(data))
+	}
+
+	// Criar um buffer para armazenar o e-mail
+	var emailBuffer bytes.Buffer
+	
+	// Escrever a mensagem no buffer usando gomail
+	_, err := m.WriteTo(&emailBuffer)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao criar mensagem raw: %w", err)
+	}
+
+	return emailBuffer.Bytes(), nil
 }
